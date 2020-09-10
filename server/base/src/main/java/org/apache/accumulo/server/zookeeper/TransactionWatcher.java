@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
 
 import org.apache.accumulo.fate.zookeeper.ZooReader;
 import org.apache.accumulo.fate.zookeeper.ZooReaderWriter;
@@ -35,9 +36,13 @@ import org.apache.zookeeper.KeeperException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.util.concurrent.Striped;
+
 public class TransactionWatcher {
 
   private static final Logger log = LoggerFactory.getLogger(TransactionWatcher.class);
+  private Striped<Lock> stripedLocks = Striped.lock(1);
+
   final private Map<Long,AtomicInteger> counts = new HashMap<>();
   final private Arbitrator arbitrator;
 
@@ -127,15 +132,37 @@ public class TransactionWatcher {
    * Run task only if transaction is still active in zookeeper. If the tx is no longer active then
    * that task is not run and a debug message is logged indicating the task was ignored.
    */
+
   public void runQuietly(String ztxBulk, long tid, Runnable task) {
-    synchronized (counts) {
+
+    Lock l = stripedLocks.get(tid);
+    l.lock();
+    try {
+      if (!arbitrator.transactionAlive(ztxBulk, tid)) {
+        log.debug("Transaction " + tid + " of type " + ztxBulk + " is no longer active.");
+        return;
+      }
+    } catch (Exception e) {
+      log.warn("Unable to check if transaction " + tid + " of type " + ztxBulk + " is alive ", e);
+      return;
+    }
+    increment(tid);
+    try {
+      task.run();
+    } finally {
+      decrement(tid);
+      l.lock();
+    }
+
+   /* synchronized (counts) {
       try {
         if (!arbitrator.transactionAlive(ztxBulk, tid)) {
           log.debug("Transaction " + tid + " of type " + ztxBulk + " is no longer active.");
           return;
         }
       } catch (Exception e) {
-        log.warn("Unable to check if transaction " + tid + " of type " + ztxBulk + " is alive ", e);
+        log.warn("Unable to check if transaction " + tid + " of type " +
+                ztxBulk + " is alive ", e);
         return;
       }
       increment(tid);
@@ -144,13 +171,38 @@ public class TransactionWatcher {
       task.run();
     } finally {
       decrement(tid);
-    }
+    }*/
   }
 
+
+
+
+
   public <T> T run(String ztxBulk, long tid, Callable<T> callable) throws Exception {
+
+    Lock l = stripedLocks.get(tid);
+    l.lock();
+
+    if (!arbitrator.transactionAlive(ztxBulk, tid)) {
+      throw new Exception("Transaction " + tid + " of type " + ztxBulk + " is no longer active");
+    }
+    increment(tid);
+
+    try {
+
+      return callable.call();
+
+    } finally {
+      decrement(tid);
+      l.unlock();
+
+    }
+
+/*
     synchronized (counts) {
       if (!arbitrator.transactionAlive(ztxBulk, tid)) {
-        throw new Exception("Transaction " + tid + " of type " + ztxBulk + " is no longer active");
+        throw new
+                Exception("Transaction " + tid + " of type " + ztxBulk + " is no longer active");
       }
       increment(tid);
     }
@@ -158,15 +210,30 @@ public class TransactionWatcher {
       return callable.call();
     } finally {
       decrement(tid);
-    }
+    }*/
   }
 
-  public boolean isActive(long tid) {
-    synchronized (counts) {
+
+  public boolean isActive(long tid){
+
+    Lock l = stripedLocks.get(tid);
+    l.lock();
+    try {
+
       log.debug("Transactions in progress {}", counts);
       AtomicInteger count = counts.get(tid);
       return count != null && count.get() > 0;
+
+    } finally {
+      l.unlock();
     }
+
+   /* synchronized (counts) {
+      log.debug("Transactions in progress {}", counts);
+      AtomicInteger count
+              = counts.get(tid);
+      return count != null && count.get() > 0;
+    }*/
   }
 
   private void increment(long tid) {
@@ -177,7 +244,11 @@ public class TransactionWatcher {
   }
 
   private void decrement(long tid) {
-    synchronized (counts) {
+
+    Lock l = stripedLocks.get(tid);
+    l.lock();
+    try {
+
       AtomicInteger count = counts.get(tid);
       if (count == null) {
         log.error("unexpected missing count for transaction {}", tid);
@@ -185,6 +256,22 @@ public class TransactionWatcher {
         if (count.decrementAndGet() == 0)
           counts.remove(tid);
       }
+
+    } finally {
+      l.unlock();
     }
+
+
+ /*   synchronized (counts) {
+      AtomicInteger count = counts.get(tid);
+      if (count == null) {
+        log.error("unexpected missing count for transaction {}", tid);
+      } else {
+        if
+        (count.decrementAndGet() == 0) counts.remove(tid);
+      }
+    }*/
   }
+
+
 }
