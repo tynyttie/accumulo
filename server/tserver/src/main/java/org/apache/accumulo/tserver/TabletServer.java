@@ -167,15 +167,19 @@ import org.apache.thrift.server.TServer;
 import org.apache.zookeeper.KeeperException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.accumulo.server.tablets.UniqueNameAllocator;
+
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Iterators;
 
 public class TabletServer extends AbstractServer {
 
+
   private static final Logger log = LoggerFactory.getLogger(TabletServer.class);
   private static final long TIME_BETWEEN_GC_CHECKS = 5000;
   private static final long TIME_BETWEEN_LOCATOR_CACHE_CLEARS = 60 * 60 * 1000;
+
 
   final GarbageCollectionLogger gcLogger = new GarbageCollectionLogger();
   final ZooCache masterLockCache;
@@ -1161,13 +1165,17 @@ public class TabletServer extends AbstractServer {
 
   public void recover(VolumeManager fs, KeyExtent extent, List<LogEntry> logEntries,
       Set<String> tabletFiles, MutationReceiver mutationReceiver) throws IOException {
+
+    UniqueNameAllocator namer = getContext().getUniqueNameAllocator();
+
     List<Path> recoveryLogs = new ArrayList<>();
     List<LogEntry> sorted = new ArrayList<>(logEntries);
     sorted.sort((e1, e2) -> (int) (e1.timestamp - e2.timestamp));
     for (LogEntry entry : sorted) {
       Path recovery = null;
-      Path finished = RecoveryPath.getRecoveryPath(new Path(entry.filename));
+      Path finished = RecoveryPath.getRecoveryPath(new Path(entry.filename + '/' + namer.getNextName()));
       finished = SortedLogState.getFinishedMarkerPath(finished);
+
       TabletServer.log.debug("Looking for " + finished);
       if (fs.exists(finished)) {
         recovery = finished.getParent();
