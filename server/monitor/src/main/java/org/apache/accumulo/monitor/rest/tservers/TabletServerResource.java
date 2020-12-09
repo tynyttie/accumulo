@@ -106,8 +106,7 @@ public class TabletServerResource {
   @Consumes(MediaType.TEXT_PLAIN)
   public void clearDeadServer(
       @QueryParam("server") @NotNull @Pattern(regexp = HOSTNAME_PORT_REGEX) String server) {
-    DeadServerList obit = new DeadServerList(monitor.getContext(),
-        monitor.getContext().getZooKeeperRoot() + Constants.ZDEADTSERVERS);
+    DeadServerList obit = new DeadServerList(monitor.getContext());
     obit.delete(server);
   }
 
@@ -322,11 +321,11 @@ public class TabletServerResource {
       ActionStatsUpdator.update(total.minors, info.minors);
       ActionStatsUpdator.update(total.majors, info.majors);
 
-      KeyExtent extent = new KeyExtent(info.extent);
-      TableId tableId = extent.getTableId();
-      MessageDigest digester = MessageDigest.getInstance(Constants.PW_HASH_ALGORITHM);
-      if (extent.getEndRow() != null && extent.getEndRow().getLength() > 0) {
-        digester.update(extent.getEndRow().getBytes(), 0, extent.getEndRow().getLength());
+      KeyExtent extent = KeyExtent.fromThrift(info.extent);
+      TableId tableId = extent.tableId();
+      MessageDigest digester = MessageDigest.getInstance(Constants.NON_CRYPTO_USE_HASH_ALGORITHM);
+      if (extent.endRow() != null && extent.endRow().getLength() > 0) {
+        digester.update(extent.endRow().getBytes(), 0, extent.endRow().getLength());
       }
       String obscuredExtent = Base64.getEncoder().encodeToString(digester.digest());
       String displayExtent = String.format("[%s]", obscuredExtent);
