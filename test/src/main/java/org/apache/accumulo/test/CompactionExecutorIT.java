@@ -25,25 +25,12 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.util.ArrayList;
-import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.Map.Entry;
-import java.util.Random;
-import java.util.Set;
-import java.util.SortedSet;
-import java.util.TreeMap;
-import java.util.TreeSet;
 import java.util.stream.Collectors;
 
-import org.apache.accumulo.core.client.Accumulo;
-import org.apache.accumulo.core.client.AccumuloClient;
-import org.apache.accumulo.core.client.AccumuloException;
-import org.apache.accumulo.core.client.AccumuloSecurityException;
-import org.apache.accumulo.core.client.IteratorSetting;
-import org.apache.accumulo.core.client.TableNotFoundException;
+import org.apache.accumulo.core.client.*;
+import org.apache.accumulo.core.client.Scanner;
 import org.apache.accumulo.core.client.admin.CompactionConfig;
 import org.apache.accumulo.core.client.admin.NewTableConfiguration;
 import org.apache.accumulo.core.client.admin.PluginConfig;
@@ -59,6 +46,8 @@ import org.apache.accumulo.core.data.TableId;
 import org.apache.accumulo.core.data.Value;
 import org.apache.accumulo.core.iterators.user.RegExFilter;
 import org.apache.accumulo.core.metadata.StoredTabletFile;
+import org.apache.accumulo.test.functional.SummaryIT;
+import org.apache.accumulo.core.client.admin.compaction.CompactionSelector;
 import org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType;
 import org.apache.accumulo.core.metadata.schema.TabletsMetadata;
 import org.apache.accumulo.core.spi.compaction.CompactionExecutorId;
@@ -66,10 +55,24 @@ import org.apache.accumulo.core.spi.compaction.CompactionKind;
 import org.apache.accumulo.core.spi.compaction.CompactionPlan;
 import org.apache.accumulo.core.spi.compaction.CompactionPlanner;
 import org.apache.accumulo.harness.SharedMiniClusterBase;
+import org.apache.accumulo.core.client.summary.Summary;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.io.Text;
 import org.bouncycastle.util.Arrays;
+
+import org.apache.accumulo.core.security.Authorizations;
+import java.util.stream.StreamSupport;
+
+
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.counting;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
+
+
+
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -595,6 +598,113 @@ public class CompactionExecutorIT extends SharedMiniClusterBase {
           msg.contains("TabletServer could not load CompactionConfigurer"));
     }
   }
+
+  @Test
+  public void testCompactionSelector() throws Exception {
+    PluginConfig csc = new PluginConfig(CompactionExecutorIT.FooSelector.class.getName());
+    CompactionConfig compactConfig = new CompactionConfig().setSelector(csc);
+    compactionTest(compactConfig);
+  }
+
+  public void compactionTest(CompactionConfig compactConfig) throws Exception {
+    final Random rand = new Random();
+    final String table = getUniqueNames(1)[0];
+    FooSelector selector = new FooSelector();
+
+    long  fooCount = 1 + (long) rand.nextInt(10),  barCount = 1 + (long) rand.nextInt(10);
+    int i, k, count = 2;
+
+    try (AccumuloClient c = Accumulo.newClient().from(getClientProps()).build()) {
+      NewTableConfiguration ntc = new NewTableConfiguration();
+      SummarizerConfiguration sc1 =
+          SummarizerConfiguration.builder(SummaryIT.FooCounter.class.getName()).build();
+      ntc.enableSummarization(sc1);
+      c.tableOperations().create(table, ntc);
+
+      try (BatchWriter bw = c.createBatchWriter(table)) {
+        write(bw, "bar1", "f1", "q1", "v1");
+        write(bw, "bar2", "f1", "q1", "v2");
+        write(bw, "foo1", "f1", "q1", "v3");
+      }
+
+      List<IteratorSetting> iterators =
+          Collections.singletonList(new IteratorSetting(100, SummaryIT.FooFilter.class));
+      compactConfig = compactConfig.setFlush(true).setIterators(iterators).setWait(true);
+
+      c.tableOperations().compact(table, compactConfig);
+
+      try (Scanner scanner = c.createScanner(table, Authorizations.EMPTY)) {
+        Stream<Entry<Key, Value>> stream = StreamSupport.stream(scanner.spliterator(), false);
+        Map<String, Long> counts = stream.map(e -> e.getKey().getRowData().toString()) // convert to
+            // row
+            .map(r -> r.replaceAll("[0-9]+", "")) // strip numbers off row
+            .collect(groupingBy(identity(), counting())); // count different row types
+
+        Exception exception = assertThrows(
+            fooSelectorException.class, () -> {
+                       FooSelector fooSelector = new FooSelector();
+                       fooSelector.select();
+            });
+
+         assertTrue(exception.getMessage().contains("Exception Thrown"));
+
+        //assertEquals(1L, (long) counts.getOrDefault("foo", 0L));
+        //assertEquals(2L, (long) counts.getOrDefault("bar", 0L));
+        //assertEquals(2, counts.size());
+        //throw new fooSelectorException("Exception Thrown");
+      }
+
+    }
+
+  }
+  private void write(BatchWriter bw, String row, String family, String qualifier, String value)
+      throws MutationsRejectedException {
+    Mutation m1 = new Mutation(row);
+    m1.put(family, qualifier, value);
+    bw.addMutation(m1);
+  }
+
+
+  static class fooSelectorException extends RuntimeException {
+    public fooSelectorException(String message) {
+      super(message);
+    }
+  }
+
+  public static class FooSelector implements CompactionSelector {
+
+    @Override
+    public void init(InitParamaters iparams) {
+    }
+
+
+
+    @Override
+    public Selection select(SelectionParameters sparams){
+      Collection<Summary> summaries = sparams.getSummaries(sparams.getAvailableFiles(),
+          conf -> conf.getClassName().contains("FooCounter"));
+
+
+      if (summaries.size() == 1) {
+        Summary summary = summaries.iterator().next();
+        Long foos = summary.getStatistics().getOrDefault("foos", 0L);
+        Long bars = summary.getStatistics().getOrDefault("bars", 0L);
+
+
+        if (foos > bars) {
+
+          throw new fooSelectorException("Exception Thrown");
+          //return new Selection(sparams.getAvailableFiles());
+        }
+        System.out.println("I am after the fooSelector");
+      }
+      return new Selection(Set.of());
+
+    }
+
+
+  }
+
 
   private Map<String,String> scanTable(AccumuloClient client, String tableName)
       throws TableNotFoundException, AccumuloSecurityException, AccumuloException {
